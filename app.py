@@ -71,7 +71,7 @@ def carregar_dados_ncp():
 df = carregar_dados_ncp()
 
 # ------------------------------------------------------------------------------
-# 3. MOTOR DE DADOS AO VIVO (API DA BINANCE)
+# 3. MOTOR DE DADOS AO VIVO E INDICADORES TÉCNICOS
 # ------------------------------------------------------------------------------
 def buscar_vela_atual_binance(ativo="BTCUSDT"):
     """Busca o Delta Real das agressões na Binance"""
@@ -96,6 +96,17 @@ def buscar_vela_atual_binance(ativo="BTCUSDT"):
     except:
         return None
 
+def calc_rsi_pine(series, length):
+    """Réplica exata da função rsi() do TradingView (Usa RMA/EWM)"""
+    delta = series.diff()
+    up = delta.clip(lower=0)
+    down = -1 * delta.clip(upper=0)
+    # TradingView RMA (Running Moving Average) equivale a EWM com alpha = 1/length
+    ema_up = up.ewm(alpha=1/length, adjust=False).mean()
+    ema_down = down.ewm(alpha=1/length, adjust=False).mean()
+    rs = ema_up / ema_down
+    return 100 - (100 / (1 + rs))
+
 # ------------------------------------------------------------------------------
 # 4. INTERFACE DE UTILIZADOR (Sidebar)
 # ------------------------------------------------------------------------------
@@ -106,22 +117,22 @@ ativo_selecionado = st.sidebar.selectbox("Ativo", ["BTCUSDT", "ETHUSDT", "SOLUSD
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("⚙️ Calibração Profunda (VSA & Flow)")
-st.sidebar.caption("Filtros avançados de Absorção e Exaustão.")
-
-# Sliders de Agressão (Delta)
 ind_delta_fundo = st.sidebar.slider("Delta % Máximo (Exaustão Venda)", min_value=-20.0, max_value=0.0, value=-5.0, step=0.5)
 ind_delta_topo  = st.sidebar.slider("Delta % Mínimo (Exaustão Compra)", min_value=0.0, max_value=20.0, value=5.0, step=0.5)
-
-# Sliders de Anatomia da Vela (Absorção e Esforço vs Resultado)
 ind_rejeicao    = st.sidebar.slider("Rejeição Mínima (%)", min_value=1.0, max_value=80.0, value=40.0, step=1.0)
-ind_corpo_max   = st.sidebar.slider("Tamanho Máx. Corpo (%)", min_value=5.0, max_value=100.0, value=35.0, step=1.0, help="Corpos menores indicam que o esforço não gerou deslocamento (Absorção).")
-
-# Sliders de Gatilho Institucional
+ind_corpo_max   = st.sidebar.slider("Tamanho Máx. Corpo (%)", min_value=5.0, max_value=100.0, value=35.0, step=1.0)
 ind_baleias     = st.sidebar.slider("Ativ. Baleias Mínima (%)", min_value=0.0, max_value=100.0, value=35.0, step=1.0)
 
-ligar_indicador = st.sidebar.toggle("🟢 Ligar Sinais de Alta Precisão", value=True)
+st.sidebar.markdown("---")
+st.sidebar.subheader("🌈 Filtro RSI (Lógica de Inversão)")
+st.sidebar.caption("Sinais em zonas extremas serão convertidos.")
+ind_rsi_len = st.sidebar.slider("Janela do RSI", min_value=5, max_value=50, value=15, step=1)
+ind_rsi_ob  = st.sidebar.slider("Sobrecompra (Força Venda)", min_value=60, max_value=100, value=80, step=1)
+ind_rsi_os  = st.sidebar.slider("Sobrevenda (Força Compra)", min_value=0, max_value=40, value=20, step=1)
+ligar_filtro_rsi = st.sidebar.toggle("🔄 Ativar Filtro de Inversão (RSI)", value=True)
 
 st.sidebar.markdown("---")
+ligar_indicador = st.sidebar.toggle("🟢 Ligar Sinais no Gráfico", value=True)
 modo_live = st.sidebar.toggle("🔴 LIVE MODE (Atualização a cada 10s)", value=False)
 
 # ------------------------------------------------------------------------------
@@ -157,37 +168,56 @@ st.markdown("---")
 # ------------------------------------------------------------------------------
 # 7. MOTOR LÓGICO PROFUNDO & GRÁFICO (Plotly)
 # ------------------------------------------------------------------------------
-df_plot = df.tail(1000).copy()
+# Prepara dados completos (RSI precisa de histórico prévio longo para precisão)
+df_full = df.copy()
 
-# Cálculo adicional em tempo de execução: Esforço vs Resultado (Percentagem de Corpo)
+if ligar_filtro_rsi or ligar_indicador:
+    df_full['rsi'] = calc_rsi_pine(df_full['close'], length=ind_rsi_len)
+
+# Corta para os últimos 1000 candles para desenhar
+df_plot = df_full.tail(1000).copy()
+
 range_vela = df_plot['high'] - df_plot['low']
-range_vela = range_vela.replace(0, 0.00001) # Prevenir divisão por zero
+range_vela = range_vela.replace(0, 0.00001) 
 df_plot['body_pct'] = (abs(df_plot['close'] - df_plot['open']) / range_vela) * 100
 
 if ligar_indicador:
-    # Lógica de Cruzamento Pentadimensional:
-    # 1. Delta Extremo (Exaustão do Retalho)
-    # 2. Pavio Longo (Limite Passivo/Absorção)
-    # 3. Corpo Pequeno (Anomalia de Esforço vs Resultado)
-    # 4. Envolvimento de Baleias
-    # 5. Predominância Direcional Real das Baleias
-    
-    df_plot['sinal_compra'] = (
+    # 1. GERAR SINAIS BRUTOS (Análise Original)
+    raw_sinal_compra = (
         (df_plot['delta_pct'] <= ind_delta_fundo) & 
         (df_plot['rejection_bot'] >= ind_rejeicao) &
         (df_plot['body_pct'] <= ind_corpo_max) & 
         (df_plot['whale_buy_pct'] >= ind_baleias) &
-        (df_plot['whale_buy_pct'] > df_plot['whale_sell_pct']) # Trava Mestra
+        (df_plot['whale_buy_pct'] > df_plot['whale_sell_pct'])
     )
     
-    df_plot['sinal_venda'] = (
+    raw_sinal_venda = (
         (df_plot['delta_pct'] >= ind_delta_topo) & 
         (df_plot['rejection_top'] >= ind_rejeicao) &
         (df_plot['body_pct'] <= ind_corpo_max) & 
         (df_plot['whale_sell_pct'] >= ind_baleias) &
-        (df_plot['whale_sell_pct'] > df_plot['whale_buy_pct']) # Trava Mestra
+        (df_plot['whale_sell_pct'] > df_plot['whale_buy_pct'])
     )
     
+    df_plot['sinal_compra'] = raw_sinal_compra
+    df_plot['sinal_venda']  = raw_sinal_venda
+
+    # 2. FILTRO DE INVERSÃO RSI (A Lógica Rainbow)
+    if ligar_filtro_rsi:
+        # Se algum sinal (qualquer que seja) ocorrer em zonas extremas
+        qualquer_sinal = raw_sinal_compra | raw_sinal_venda
+        
+        cond_sobrecompra = qualquer_sinal & (df_plot['rsi'] >= ind_rsi_ob)
+        cond_sobrevenda  = qualquer_sinal & (df_plot['rsi'] <= ind_rsi_os)
+        
+        # AÇÃO: Na Sobrecompra, tudo se torna VENDA
+        df_plot.loc[cond_sobrecompra, 'sinal_compra'] = False
+        df_plot.loc[cond_sobrecompra, 'sinal_venda'] = True
+        
+        # AÇÃO: Na Sobrevenda, tudo se torna COMPRA
+        df_plot.loc[cond_sobrevenda, 'sinal_venda'] = False
+        df_plot.loc[cond_sobrevenda, 'sinal_compra'] = True
+
     sinais_compra = df_plot[df_plot['sinal_compra']]
     sinais_venda = df_plot[df_plot['sinal_venda']]
 else:
@@ -195,15 +225,18 @@ else:
     sinais_venda = pd.DataFrame()
 
 # Criação do Gráfico
-fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3])
+if ligar_filtro_rsi:
+    # 3 Linhas se o RSI estiver visível
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.6, 0.2, 0.2])
+else:
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3])
 
-# Velas
+# Linha 1: Velas e Sinais
 fig.add_trace(go.Candlestick(
     x=df_plot.index, open=df_plot['open'], high=df_plot['high'], low=df_plot['low'], close=df_plot['close'],
     name='Preço', increasing_line_color='#00E676', decreasing_line_color='#FF1744'
 ), row=1, col=1)
 
-# Sinais
 if ligar_indicador:
     if not sinais_compra.empty:
         fig.add_trace(go.Scatter(
@@ -219,14 +252,26 @@ if ligar_indicador:
             name='SELL', text="SELL", textposition="top center"
         ), row=1, col=1)
 
-# Delta Bar
+# Linha 2: Delta Bar
 cores_delta = ['#00E676' if d > 0 else '#FF1744' for d in df_plot['delta']]
 fig.add_trace(go.Bar(
     x=df_plot.index, y=df_plot['delta'], name='Delta Volume', marker_color=cores_delta, opacity=0.8
 ), row=2, col=1)
 
+# Linha 3: RSI (Filtro Rainbow)
+if ligar_filtro_rsi:
+    fig.add_trace(go.Scatter(
+        x=df_plot.index, y=df_plot['rsi'], name='RSI', line=dict(color='#00BFFF', width=2)
+    ), row=3, col=1)
+    
+    # Linhas de Sobrecompra / Sobrevenda
+    fig.add_hline(y=ind_rsi_ob, line_dash="dash", line_color="#FF1744", opacity=0.8, row=3, col=1)
+    fig.add_hline(y=ind_rsi_os, line_dash="dash", line_color="#00E676", opacity=0.8, row=3, col=1)
+    fig.update_yaxes(title_text="RSI", range=[0, 100], row=3, col=1)
+
+altura_grafico = 800 if ligar_filtro_rsi else 650
 fig.update_layout(
-    template='plotly_dark', height=650, margin=dict(l=10, r=10, t=10, b=10), 
+    template='plotly_dark', height=altura_grafico, margin=dict(l=10, r=10, t=10, b=10), 
     xaxis_rangeslider_visible=False, showlegend=False,
     plot_bgcolor='#0E1117', paper_bgcolor='#0E1117'
 )
@@ -235,7 +280,7 @@ st.plotly_chart(fig, use_container_width=True)
 # ------------------------------------------------------------------------------
 # 8. DIAGNÓSTICO DO SISTEMA E ESTATÍSTICAS
 # ------------------------------------------------------------------------------
-with st.expander("🛠️ Raio-X do Motor (Microestrutura)", expanded=True):
+with st.expander("🛠️ Raio-X do Motor (Microestrutura)", expanded=False):
     st.markdown("Verifique os limites matemáticos extraídos do dataset para afinar os Filtros de Absorção.")
     
     col_d1, col_d2, col_d3 = st.columns(3)
