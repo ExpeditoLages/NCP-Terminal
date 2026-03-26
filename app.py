@@ -1,5 +1,5 @@
 # ==============================================================================
-# PLATAFORMA DE ANÁLISE QUANTITATIVA - NCP v11 (VERSÃO ROBUSTA)
+# PLATAFORMA DE ANÁLISE QUANTITATIVA - NCP v11 (VERSÃO ROBUSTA E COMPLETA)
 # Tecnologias: Streamlit (Interface) + Plotly (Gráficos) + Pandas (Dados)
 # ==============================================================================
 
@@ -44,19 +44,25 @@ def carregar_dados_ncp():
         df.set_index(nome_coluna_data, inplace=True)
         
         # VERIFICAÇÃO DE SEGURANÇA: Garante que as colunas essenciais existem
-        colunas_necessarias = ['open', 'high', 'low', 'close', 'delta_pct', 'rejection_bot', 'rejection_top', 'delta']
+        colunas_necessarias = [
+            'open', 'high', 'low', 'close', 'delta_pct', 'delta',
+            'rejection_bot', 'rejection_top', 'whale_buy_pct', 'whale_sell_pct'
+        ]
         for col in colunas_necessarias:
             if col not in df.columns:
-                # Se faltar alguma, cria colunas zeradas para não "crashar" o app
-                df[col] = 0.0 
+                df[col] = 0.0 # Se faltar alguma, cria colunas zeradas
         
-        # NORMALIZAÇÃO DE ESCALA: Se os dados vieram como 0.5 em vez de 50.0%, corrige.
+        # NORMALIZAÇÃO DE ESCALA: Corrige dados decimais (0.5) para percentuais (50.0%)
         if df['rejection_bot'].max() <= 1.0 and df['rejection_bot'].max() > 0:
             df['rejection_bot'] = df['rejection_bot'] * 100
             df['rejection_top'] = df['rejection_top'] * 100
             
         if abs(df['delta_pct'].max()) <= 1.0 and abs(df['delta_pct'].min()) >= -1.0:
             df['delta_pct'] = df['delta_pct'] * 100
+            
+        if df['whale_buy_pct'].max() <= 1.0 and df['whale_buy_pct'].max() > 0:
+            df['whale_buy_pct'] = df['whale_buy_pct'] * 100
+            df['whale_sell_pct'] = df['whale_sell_pct'] * 100
             
         return df
     except Exception as e:
@@ -71,7 +77,7 @@ def buscar_vela_atual_binance(ativo="BTCUSDT"):
     """Busca o Delta Real das agressões na Binance"""
     try:
         url = f"https://api.binance.com/api/v3/aggTrades?symbol={ativo}&limit=1000"
-        resposta = requests.get(url, timeout=5) # Timeout de 5s para não travar
+        resposta = requests.get(url, timeout=5)
         if resposta.status_code != 200:
             return None
             
@@ -99,12 +105,14 @@ st.sidebar.markdown("---")
 ativo_selecionado = st.sidebar.selectbox("Ativo", ["BTCUSDT", "ETHUSDT", "SOLUSDT"])
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("⚙️ Calibração de Sinal")
-st.sidebar.caption("Ajuste os parâmetros para encontrar instituições.")
+st.sidebar.subheader("⚙️ Calibração de Sinal (Order Flow)")
+st.sidebar.caption("Padrões baseados nas medianas da Célula 7 do Colab.")
 
-ind_delta_fundo = st.sidebar.slider("Delta % Máximo (Fundo)", min_value=-20.0, max_value=0.0, value=-2.0, step=0.5)
-ind_delta_topo = st.sidebar.slider("Delta % Mínimo (Topo)", min_value=0.0, max_value=20.0, value=2.0, step=0.5)
-ind_rejeicao = st.sidebar.slider("Rejeição Mínima (%)", min_value=1.0, max_value=80.0, value=15.0, step=1.0)
+# Valores padrão extraídos diretamente da análise estatística do Colab
+ind_delta_fundo = st.sidebar.slider("Delta % Máximo (Fundo)", min_value=-20.0, max_value=0.0, value=-5.0, step=0.5)
+ind_delta_topo  = st.sidebar.slider("Delta % Mínimo (Topo)", min_value=0.0, max_value=20.0, value=5.0, step=0.5)
+ind_rejeicao    = st.sidebar.slider("Rejeição Mínima (%)", min_value=1.0, max_value=80.0, value=45.0, step=1.0)
+ind_baleias     = st.sidebar.slider("Ativ. Baleias Mínima (%)", min_value=0.0, max_value=100.0, value=35.0, step=1.0)
 
 ligar_indicador = st.sidebar.toggle("🟢 Ligar Sinais no Gráfico", value=True)
 
@@ -115,7 +123,6 @@ modo_live = st.sidebar.toggle("🔴 LIVE MODE (Atualização a cada 10s)", value
 # 5. LÓGICA DO LIVE MODE (Segura)
 # ------------------------------------------------------------------------------
 if modo_live:
-    # Usa um componente vazio para forçar uma mensagem de atualização sem travar o UI
     placeholder = st.sidebar.empty()
     placeholder.info("🔄 Auto-refresh ativado...")
 
@@ -148,9 +155,17 @@ st.markdown("---")
 df_plot = df.tail(1000).copy()
 
 if ligar_indicador:
-    # Lógica de Cruzamento: Comparações Robustas
-    df_plot['sinal_compra'] = (df_plot['delta_pct'] <= ind_delta_fundo) & (df_plot['rejection_bot'] >= ind_rejeicao)
-    df_plot['sinal_venda'] = (df_plot['delta_pct'] >= ind_delta_topo) & (df_plot['rejection_top'] >= ind_rejeicao)
+    # Lógica de Cruzamento Tripla: Delta Extremo + Absorção de Pavio + Confirmação de Baleias
+    df_plot['sinal_compra'] = (
+        (df_plot['delta_pct'] <= ind_delta_fundo) & 
+        (df_plot['rejection_bot'] >= ind_rejeicao) &
+        (df_plot['whale_buy_pct'] >= ind_baleias)
+    )
+    df_plot['sinal_venda'] = (
+        (df_plot['delta_pct'] >= ind_delta_topo) & 
+        (df_plot['rejection_top'] >= ind_rejeicao) &
+        (df_plot['whale_sell_pct'] >= ind_baleias)
+    )
     
     sinais_compra = df_plot[df_plot['sinal_compra']]
     sinais_venda = df_plot[df_plot['sinal_venda']]
@@ -197,18 +212,22 @@ fig.update_layout(
 st.plotly_chart(fig, use_container_width=True)
 
 # ------------------------------------------------------------------------------
-# 8. DIAGNÓSTICO DO SISTEMA (À prova de falhas)
+# 8. DIAGNÓSTICO DO SISTEMA E ESTATÍSTICAS
 # ------------------------------------------------------------------------------
-with st.expander("🛠️ Diagnóstico do Motor (Verifique a escala dos seus dados)", expanded=True):
-    st.markdown("Se não vê sinais no gráfico, compare os limites máximos dos seus dados abaixo com os sliders laterais.")
-    col_diag1, col_diag2, col_diag3, col_diag4 = st.columns(4)
+with st.expander("🛠️ Raio-X do Motor (Limites Extremos do Dataset)", expanded=True):
+    st.markdown("Verifique se os sliders laterais não estão a exigir valores acima dos máximos históricos alcançados.")
     
-    col_diag1.metric("Delta % Máximo Ocorrido", f"{df_plot['delta_pct'].max():.2f}%")
-    col_diag2.metric("Delta % Mínimo Ocorrido", f"{df_plot['delta_pct'].min():.2f}%")
-    col_diag3.metric("Maior Rejeição (Fundo)", f"{df_plot['rejection_bot'].max():.2f}%")
-    col_diag4.metric("Maior Rejeição (Topo)", f"{df_plot['rejection_top'].max():.2f}%")
+    col_d1, col_d2, col_d3 = st.columns(3)
+    col_d1.metric("Delta Mais Negativo (Fundo)", f"{df_plot['delta_pct'].min():.2f}%")
+    col_d2.metric("Maior Rejeição Inferior", f"{df_plot['rejection_bot'].max():.2f}%")
+    col_d3.metric("Maior Atividade Baleia (Compra)", f"{df_plot['whale_buy_pct'].max():.2f}%")
     
-    st.caption("💡 Exemplo: Se a sua 'Maior Rejeição' listada for 12%, e o slider estiver em 15%, nenhum sinal será gerado. Baixe o slider!")
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    col_d4, col_d5, col_d6 = st.columns(3)
+    col_d4.metric("Delta Mais Positivo (Topo)", f"{df_plot['delta_pct'].max():.2f}%")
+    col_d5.metric("Maior Rejeição Superior", f"{df_plot['rejection_top'].max():.2f}%")
+    col_d6.metric("Maior Atividade Baleia (Venda)", f"{df_plot['whale_sell_pct'].max():.2f}%")
 
 # ------------------------------------------------------------------------------
 # 9. EXECUÇÃO DO REFRESH AO VIVO (No Final do Script)
