@@ -1,5 +1,5 @@
 # ==============================================================================
-# PLATAFORMA DE ANÁLISE QUANTITATIVA - NCP v11 (VERSÃO ROBUSTA E COMPLETA)
+# PLATAFORMA DE ANÁLISE QUANTITATIVA - NCP v11 (VERSÃO DEEP ANALYSIS)
 # Tecnologias: Streamlit (Interface) + Plotly (Gráficos) + Pandas (Dados)
 # ==============================================================================
 
@@ -105,16 +105,21 @@ st.sidebar.markdown("---")
 ativo_selecionado = st.sidebar.selectbox("Ativo", ["BTCUSDT", "ETHUSDT", "SOLUSDT"])
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("⚙️ Calibração de Sinal (Order Flow)")
-st.sidebar.caption("Padrões baseados nas medianas da Célula 7 do Colab.")
+st.sidebar.subheader("⚙️ Calibração Profunda (VSA & Flow)")
+st.sidebar.caption("Filtros avançados de Absorção e Exaustão.")
 
-# Valores padrão extraídos diretamente da análise estatística do Colab
-ind_delta_fundo = st.sidebar.slider("Delta % Máximo (Fundo)", min_value=-20.0, max_value=0.0, value=-5.0, step=0.5)
-ind_delta_topo  = st.sidebar.slider("Delta % Mínimo (Topo)", min_value=0.0, max_value=20.0, value=5.0, step=0.5)
-ind_rejeicao    = st.sidebar.slider("Rejeição Mínima (%)", min_value=1.0, max_value=80.0, value=45.0, step=1.0)
+# Sliders de Agressão (Delta)
+ind_delta_fundo = st.sidebar.slider("Delta % Máximo (Exaustão Venda)", min_value=-20.0, max_value=0.0, value=-5.0, step=0.5)
+ind_delta_topo  = st.sidebar.slider("Delta % Mínimo (Exaustão Compra)", min_value=0.0, max_value=20.0, value=5.0, step=0.5)
+
+# Sliders de Anatomia da Vela (Absorção e Esforço vs Resultado)
+ind_rejeicao    = st.sidebar.slider("Rejeição Mínima (%)", min_value=1.0, max_value=80.0, value=40.0, step=1.0)
+ind_corpo_max   = st.sidebar.slider("Tamanho Máx. Corpo (%)", min_value=5.0, max_value=100.0, value=35.0, step=1.0, help="Corpos menores indicam que o esforço não gerou deslocamento (Absorção).")
+
+# Sliders de Gatilho Institucional
 ind_baleias     = st.sidebar.slider("Ativ. Baleias Mínima (%)", min_value=0.0, max_value=100.0, value=35.0, step=1.0)
 
-ligar_indicador = st.sidebar.toggle("🟢 Ligar Sinais no Gráfico", value=True)
+ligar_indicador = st.sidebar.toggle("🟢 Ligar Sinais de Alta Precisão", value=True)
 
 st.sidebar.markdown("---")
 modo_live = st.sidebar.toggle("🔴 LIVE MODE (Atualização a cada 10s)", value=False)
@@ -150,21 +155,37 @@ else:
 st.markdown("---")
 
 # ------------------------------------------------------------------------------
-# 7. MOTOR LÓGICO & GRÁFICO (Plotly)
+# 7. MOTOR LÓGICO PROFUNDO & GRÁFICO (Plotly)
 # ------------------------------------------------------------------------------
 df_plot = df.tail(1000).copy()
 
+# Cálculo adicional em tempo de execução: Esforço vs Resultado (Percentagem de Corpo)
+range_vela = df_plot['high'] - df_plot['low']
+range_vela = range_vela.replace(0, 0.00001) # Prevenir divisão por zero
+df_plot['body_pct'] = (abs(df_plot['close'] - df_plot['open']) / range_vela) * 100
+
 if ligar_indicador:
-    # Lógica de Cruzamento Tripla: Delta Extremo + Absorção de Pavio + Confirmação de Baleias
+    # Lógica de Cruzamento Pentadimensional:
+    # 1. Delta Extremo (Exaustão do Retalho)
+    # 2. Pavio Longo (Limite Passivo/Absorção)
+    # 3. Corpo Pequeno (Anomalia de Esforço vs Resultado)
+    # 4. Envolvimento de Baleias
+    # 5. Predominância Direcional Real das Baleias
+    
     df_plot['sinal_compra'] = (
         (df_plot['delta_pct'] <= ind_delta_fundo) & 
         (df_plot['rejection_bot'] >= ind_rejeicao) &
-        (df_plot['whale_buy_pct'] >= ind_baleias)
+        (df_plot['body_pct'] <= ind_corpo_max) & 
+        (df_plot['whale_buy_pct'] >= ind_baleias) &
+        (df_plot['whale_buy_pct'] > df_plot['whale_sell_pct']) # Trava Mestra
     )
+    
     df_plot['sinal_venda'] = (
         (df_plot['delta_pct'] >= ind_delta_topo) & 
         (df_plot['rejection_top'] >= ind_rejeicao) &
-        (df_plot['whale_sell_pct'] >= ind_baleias)
+        (df_plot['body_pct'] <= ind_corpo_max) & 
+        (df_plot['whale_sell_pct'] >= ind_baleias) &
+        (df_plot['whale_sell_pct'] > df_plot['whale_buy_pct']) # Trava Mestra
     )
     
     sinais_compra = df_plot[df_plot['sinal_compra']]
@@ -214,20 +235,20 @@ st.plotly_chart(fig, use_container_width=True)
 # ------------------------------------------------------------------------------
 # 8. DIAGNÓSTICO DO SISTEMA E ESTATÍSTICAS
 # ------------------------------------------------------------------------------
-with st.expander("🛠️ Raio-X do Motor (Limites Extremos do Dataset)", expanded=True):
-    st.markdown("Verifique se os sliders laterais não estão a exigir valores acima dos máximos históricos alcançados.")
+with st.expander("🛠️ Raio-X do Motor (Microestrutura)", expanded=True):
+    st.markdown("Verifique os limites matemáticos extraídos do dataset para afinar os Filtros de Absorção.")
     
     col_d1, col_d2, col_d3 = st.columns(3)
-    col_d1.metric("Delta Mais Negativo (Fundo)", f"{df_plot['delta_pct'].min():.2f}%")
+    col_d1.metric("Delta Mais Negativo (Exaustão)", f"{df_plot['delta_pct'].min():.2f}%")
     col_d2.metric("Maior Rejeição Inferior", f"{df_plot['rejection_bot'].max():.2f}%")
-    col_d3.metric("Maior Atividade Baleia (Compra)", f"{df_plot['whale_buy_pct'].max():.2f}%")
+    col_d3.metric("Maior Compra de Baleias", f"{df_plot['whale_buy_pct'].max():.2f}%")
     
     st.markdown("<br>", unsafe_allow_html=True)
     
     col_d4, col_d5, col_d6 = st.columns(3)
-    col_d4.metric("Delta Mais Positivo (Topo)", f"{df_plot['delta_pct'].max():.2f}%")
+    col_d4.metric("Delta Mais Positivo (Euforia)", f"{df_plot['delta_pct'].max():.2f}%")
     col_d5.metric("Maior Rejeição Superior", f"{df_plot['rejection_top'].max():.2f}%")
-    col_d6.metric("Maior Atividade Baleia (Venda)", f"{df_plot['whale_sell_pct'].max():.2f}%")
+    col_d6.metric("Menor Corpo Observado (Doji)", f"{df_plot['body_pct'].min():.2f}%")
 
 # ------------------------------------------------------------------------------
 # 9. EXECUÇÃO DO REFRESH AO VIVO (No Final do Script)
